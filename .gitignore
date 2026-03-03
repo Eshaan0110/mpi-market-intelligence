@@ -205,3 +205,21 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ── MPi Project Specific ─────────────────────────────────────────────────────
+
+# Data files — re-download via scripts instead
+data/raw/
+data/processed/
+*.parquet
+*.xlsx
+*.xls
+
+# Secrets
+.env
+
+# Playwright browser binaries (large, downloaded via `playwright install`)
+.playwright/
+
+# macOS
+.DS_Store
