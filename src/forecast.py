@@ -130,23 +130,14 @@ def forecast_series(
 
 
 def _build_prophet() -> Prophet:
-    """Shared Prophet config — with COVID lockdown changepoints."""
+    """Shared Prophet config for all series."""
     return Prophet(
         yearly_seasonality=True,
         weekly_seasonality=False,
         daily_seasonality=False,
         seasonality_mode="multiplicative",
         interval_width=0.90,
-        # Tell Prophet about known structural breaks
-        # so it doesn't confuse them for trend changes
-        changepoints=[
-            "2020-03-01",  # COVID lockdown starts
-            "2020-06-01",  # Unlock phase begins
-            "2021-04-01",  # Second wave
-            "2021-06-01",  # Recovery
-        ],
-        changepoint_prior_scale=0.05,  # conservative — don't overfit to noise
-    )
+    )              
 
 # ── Plot builder ───────────────────────────────────────────────────────────
 
