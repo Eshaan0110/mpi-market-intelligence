@@ -1,9 +1,18 @@
 """
 src/ingestion.py
-RBI Payment System Indicators — Parser
-Extracts credit/debit card transaction data from RBI Table 45 Excel.
+RBI + NPCI Data Ingestion Pipeline
+====================================
+Dataset 1: RBI Payment System Indicators (Table 45)
+  - Monthly credit/debit card transaction volumes and values
+  - Cards outstanding (credit + debit)
+  - Source: RBI DBIE → Statistics → Financial Sector → Payment Systems
 
-Column mapping (0-indexed, verified against actual RBI file):
+Dataset 2: NPCI UPI Product Statistics
+  - Monthly UPI transaction volume and value
+  - Number of banks live on UPI
+  - Source: https://www.npci.org.in/what-we-do/upi/upi-ecosystem-statistics
+
+Column mapping for RBI Excel (0-indexed, verified against actual file):
   1   = Month/Year
   52  = Credit Cards Volume (Lakh)
   53  = Credit Cards Value (Rupees Crores)
@@ -25,7 +34,7 @@ PROC_DIR = ROOT_DIR / "data" / "processed"
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 PROC_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Exact column indices from RBI Excel (0-based, verified) ───────────────
+# ── RBI Column indices (0-based, verified) ─────────────────────────────────
 COL_DATE             = 1
 COL_CREDIT_VOL       = 52
 COL_CREDIT_VAL       = 53
@@ -36,16 +45,24 @@ COL_DEBIT_CARDS_OUT  = 120
 DATA_START_ROW       = 7    # first row index of actual monthly data
 
 
+# ── Shared helper ──────────────────────────────────────────────────────────
+
 def safe_float(row, idx):
-    """Return float from row[idx], or None if missing/dash/invalid."""
+    """Return float from row[idx], or None if missing/dash/invalid.
+    Handles comma-formatted numbers e.g. '21,703.44' from newer NPCI files.
+    """
     val = row[idx] if len(row) > idx else None
     if val is None or str(val).strip() in ("-", ""):
         return None
     try:
-        return float(val)
+        return float(str(val).replace(",", "").strip())
     except (ValueError, TypeError):
         return None
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DATASET 1 — RBI Payment System Indicators
+# ══════════════════════════════════════════════════════════════════════════════
 
 def parse_psi_excel(filepath: str | Path) -> pd.DataFrame:
     """
@@ -87,43 +104,37 @@ def parse_psi_excel(filepath: str | Path) -> pd.DataFrame:
             .reset_index(drop=True))
 
     logger.info(
-        f"Parsed {len(df)} rows | "
+        f"RBI PSI parsed: {len(df)} rows | "
         f"{df['date'].min().strftime('%b %Y')} → "
         f"{df['date'].max().strftime('%b %Y')}"
     )
     return df
 
 
-def save_outputs(df: pd.DataFrame) -> None:
-    """Save to both CSV (human readable) and Parquet (ML ready)."""
-    df.to_csv(PROC_DIR / "rbi_psi_cards.csv", index=False)
-    df.to_parquet(PROC_DIR / "rbi_psi_cards.parquet", index=False)
-    logger.info(f"Outputs saved to {PROC_DIR}")
-
-
 def run_ingestion(excel_path: str | Path = None) -> pd.DataFrame:
-    """Main entry point — parse, validate, save."""
+    """Main entry point for RBI PSI — parse, validate, save."""
     if excel_path is None:
-        # Default: look for the file in data/raw/
         matches = list(RAW_DIR.glob("*Payment_System*"))
         if not matches:
             raise FileNotFoundError(
                 f"No Payment System Indicators Excel found in {RAW_DIR}\n"
-                "Download it from: RBI DBIE → Statistics → Financial Sector → Payment Systems"
+                "Download from: RBI DBIE → Statistics → Financial Sector → Payment Systems"
             )
         excel_path = matches[0]
         logger.info(f"Auto-found: {excel_path.name}")
 
     df = parse_psi_excel(excel_path)
 
-    # Warn on columns with too many nulls
+    # Warn on high nulls
     for col, pct in (df.isnull().mean() * 100).items():
         if pct > 20:
             logger.warning(f"High nulls in '{col}': {pct:.1f}%")
 
-    save_outputs(df)
+    df.to_csv(PROC_DIR / "rbi_psi_cards.csv", index=False)
+    df.to_parquet(PROC_DIR / "rbi_psi_cards.parquet", index=False)
+    logger.info(f"RBI PSI saved to {PROC_DIR}")
 
-    print("\n=== Sample — last 5 months ===")
+    print("\n=== RBI PSI — last 5 months ===")
     print(df.tail().to_string(index=False))
     print(f"\nTotal rows : {len(df)}")
     print(f"Date range : {df['date'].min().strftime('%b %Y')} → {df['date'].max().strftime('%b %Y')}")
@@ -132,5 +143,102 @@ def run_ingestion(excel_path: str | Path = None) -> pd.DataFrame:
     return df
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# DATASET 2 — NPCI UPI Product Statistics
+# ══════════════════════════════════════════════════════════════════════════════
+
+def parse_npci_upi_excel(filepath: str | Path) -> pd.DataFrame:
+    """
+    Parse a single NPCI UPI Product Statistics yearly Excel file.
+    Format: Row 0 = header, data from row 1. Clean structure, no merged cells.
+
+    Columns: Month | No. of Banks live on UPI | Volume (In Mn.) | Value (In Cr.)
+    """
+    filepath = Path(filepath)
+    wb   = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
+    ws   = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+
+    records = []
+    for row in rows[1:]:    # skip header row
+        if not row[0]:
+            continue
+        try:
+            date = pd.to_datetime(row[0], format="%B-%Y")
+        except Exception:
+            logger.debug(f"Skipping row: {row[0]}")
+            continue
+
+        records.append({
+            "date":           date,
+            "upi_banks_live": safe_float(row, 1),
+            "upi_volume_mn":  safe_float(row, 2),
+            "upi_value_cr":   safe_float(row, 3),
+        })
+
+    return pd.DataFrame(records)
+
+
+def run_npci_ingestion() -> pd.DataFrame:
+    """
+    Loop through all NPCI yearly Excel files in data/raw/,
+    parse each one, stack into a single DataFrame, and save.
+    """
+    files = sorted(RAW_DIR.glob("Product-Statistics-UPI*"))
+    if not files:
+        raise FileNotFoundError(
+            f"No NPCI UPI Excel files found in {RAW_DIR}\n"
+            "Download from: https://www.npci.org.in/what-we-do/upi/upi-ecosystem-statistics"
+        )
+
+    logger.info(f"Found {len(files)} NPCI yearly files")
+
+    frames = []
+    for f in files:
+        logger.info(f"Parsing: {f.name}")
+        df = parse_npci_upi_excel(f)
+        frames.append(df)
+
+    # Stack all years, sort, deduplicate
+    combined = (pd.concat(frames, ignore_index=True)
+                  .sort_values("date")
+                  .drop_duplicates(subset=["date"])
+                  .reset_index(drop=True))
+
+    logger.info(
+        f"NPCI UPI parsed: {len(combined)} months | "
+        f"{combined['date'].min().strftime('%b %Y')} → "
+        f"{combined['date'].max().strftime('%b %Y')}"
+    )
+
+    # Warn on high nulls
+    for col, pct in (combined.isnull().mean() * 100).items():
+        if pct > 10:
+            logger.warning(f"High nulls in '{col}': {pct:.1f}%")
+
+    combined.to_csv(PROC_DIR / "npci_upi.csv", index=False)
+    combined.to_parquet(PROC_DIR / "npci_upi.parquet", index=False)
+    logger.info(f"NPCI UPI saved to {PROC_DIR}")
+
+    print("\n=== NPCI UPI — last 5 months ===")
+    print(combined.tail().to_string(index=False))
+    print(f"\nTotal rows : {len(combined)}")
+    print(f"Date range : {combined['date'].min().strftime('%b %Y')} → {combined['date'].max().strftime('%b %Y')}")
+
+    return combined
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN — runs both datasets
+# ══════════════════════════════════════════════════════════════════════════════
+
 if __name__ == "__main__":
+    print("\n" + "="*50)
+    print("DATASET 1 — RBI Payment System Indicators")
+    print("="*50)
     run_ingestion()
+
+    print("\n" + "="*50)
+    print("DATASET 2 — NPCI UPI Product Statistics")
+    print("="*50)
+    run_npci_ingestion()
