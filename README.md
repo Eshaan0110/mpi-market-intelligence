@@ -26,7 +26,7 @@ mpi-market-intelligence/
 
 **Requirements:** Python 3.11+, [uv](https://astral.sh/uv)
 ```bash
-git clone https://github.com/YOUR_USERNAME/mpi-market-intelligence.git
+git clone https://github.com/Eshaan0110/mpi-market-intelligence.git
 cd mpi-market-intelligence
 uv sync                        # installs all dependencies from uv.lock
 ```
